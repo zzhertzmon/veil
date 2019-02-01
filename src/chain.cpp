@@ -152,7 +152,7 @@ int64_t CBlockIndex::GetBlockWork() const
     // PoS blocks are also the only type of block that has the scoring of the block directly based on the elapsed time
     // of this block and the prev. PoW is not bound by timestamps the same way PoS is, so it is not as safe to do with PoW
     if (IsProofOfStake()) {
-        nBlockWork += 1000 + (GetBlockTime() - pprev->GetBlockTime());
+        nBlockWork += 1000 - (GetBlockTime() - pprev->GetBlockTime());
     }
 
     return nBlockWork;
