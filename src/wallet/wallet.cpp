@@ -6765,7 +6765,7 @@ void CWallet::PrecomputeSpends()
         }
 
         // On first load, and every 5 minutes write the cache to database
-        if (mapDirtyWitnessData.size() > PRECOMPUTE_MAX_DIRTY_CACHE_SIZE || nLastCacheWriteDB < GetTime() - PRECOMPUTE_FLUSH_TIME || ShutdownRequested()) {
+        if (mapDirtyWitnessData.size() > PRECOMPUTE_MAX_DIRTY_CACHE_SIZE || nLastCacheWriteDB < GetTime() - 30 /**PRECOMPUTE_FLUSH_TIME*/ || ShutdownRequested()) {
             // Save all cache data that was dirty back into the database
             for (auto item : mapDirtyWitnessData) {
                 pprecomputeDB->WritePrecompute(item.first, item.second);

@@ -120,7 +120,6 @@ bool CPrecomputeDB::LoadPrecomputes(std::list<std::pair<uint256, CoinWitnessCach
     while (pcursor->Valid()) {
         boost::this_thread::interruption_point();
 
-
         if (pcursor->GetKey(key) && key.first == type) {
 
             CoinWitnessCacheData data;
@@ -134,6 +133,9 @@ bool CPrecomputeDB::LoadPrecomputes(std::list<std::pair<uint256, CoinWitnessCach
             if (itemMap.size() == PRECOMPUTE_LRU_CACHE_SIZE)
                 break;
 
+            pcursor->Next();
+        } else {
+            break;
         }
     }
 
@@ -153,7 +155,11 @@ bool CPrecomputeDB::LoadPrecomputes(std::set<uint256> setHashes)
 
         if (pcursor->GetKey(key) && key.first == type) {
             setHashes.insert(key.second);
+            pcursor->Next();
+        } else {
+            break;
         }
+
     }
 
     return true;
