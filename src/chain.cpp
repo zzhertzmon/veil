@@ -155,8 +155,8 @@ int64_t CBlockIndex::GetBlockWork() const
         nBlockWork += 1000 - (GetBlockTime() - pprev->GetBlockTime());
     }
 
-    if (nBlockWork < 0)
-        return 0;
+    if (nBlockWork <= 0)
+        return 1;
 
     return nBlockWork;
 }
