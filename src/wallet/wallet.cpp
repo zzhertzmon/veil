@@ -5511,16 +5511,17 @@ bool CWallet::MintToTxIn(CZerocoinMint zerocoinSelected, int nSecurityLevel, con
     privateCoin.setPrivKey(key.GetPrivKey());
 
 
-    auto nChecksum = GetChecksum(coinwitness->pAccumulator->getValue());
+    libzerocoin::Accumulator accumulator = mapAccumulators.GetAccumulator(coinwitness->denom);
+    auto nChecksum = GetChecksum(accumulator.getValue());
     CBigNum bnValue;
     if (!GetAccumulatorValueFromChecksum(nChecksum, false, bnValue) || bnValue == 0)
         return error("%s: could not find checksum used for spend\n", __func__);
 
     try {
-        libzerocoin::CoinSpend spend(Params().Zerocoin_Params(), privateCoin, *coinwitness->pAccumulator, nChecksum, *coinwitness->pWitness, hashTxOut, spendType);
+        libzerocoin::CoinSpend spend(Params().Zerocoin_Params(), privateCoin, accumulator, nChecksum, *coinwitness->pWitness, hashTxOut, spendType);
 
         std::string strError;
-        if (!spend.Verify(*coinwitness->pAccumulator, strError, true)) {
+        if (!spend.Verify(accumulator, strError, true)) {
             receipt.SetStatus(_("The new spend coin transaction did not verify"), ZINVALID_WITNESS);
             return false;
         }
@@ -5561,7 +5562,7 @@ bool CWallet::MintToTxIn(CZerocoinMint zerocoinSelected, int nSecurityLevel, con
             return false;
         }
 
-        auto nAccumulatorChecksum = GetChecksum(coinwitness->pAccumulator->getValue());
+        auto nAccumulatorChecksum = GetChecksum(accumulator.getValue());
         CZerocoinSpend zcSpend(spend.getCoinSerialNumber(), uint256(), zerocoinSelected.GetValue(),
                 zerocoinSelected.GetDenomination(), nAccumulatorChecksum);
         zcSpend.SetMintCount(coinwitness->nMintsAdded);
