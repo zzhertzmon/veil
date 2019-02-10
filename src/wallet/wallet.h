@@ -1341,6 +1341,9 @@ public:
     };
 };
 
+// Triggers the precomputes caches to write to database
+void DumpPrecomputes();
+
 /** A key allocated from the key pool. */
 class CReserveKey final : public CReserveScript
 {
