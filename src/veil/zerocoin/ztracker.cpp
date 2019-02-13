@@ -144,7 +144,7 @@ CAmount CzTracker::GetBalance(bool fConfirmedOnly, bool fUnconfirmedOnly) const
             CMintMeta meta = it.second;
             if (meta.isUsed || meta.isArchived)
                 continue;
-            bool fConfirmed = ((meta.nHeight < chainActive.Height() - Params().Zerocoin_MintRequiredConfirmations()) && !(meta.nHeight == 0));
+            bool fConfirmed = ((meta.nHeight <= chainActive.Height()) && !(meta.nHeight == 0));
             if (fConfirmedOnly && !fConfirmed)
                 continue;
             if (fUnconfirmedOnly && fConfirmed)
@@ -172,7 +172,7 @@ std::vector<CMintMeta> CzTracker::GetMints(bool fConfirmedOnly) const
         CMintMeta mint = it.second;
         if (mint.isArchived || mint.isUsed)
             continue;
-        bool fConfirmed = (mint.nHeight < chainActive.Height() - Params().Zerocoin_MintRequiredConfirmations());
+        bool fConfirmed = (mint.nHeight <= chainActive.Height());
         if (fConfirmed)
             mint.nMemFlags |= MINT_CONFIRMED;
         if (fConfirmedOnly && !fConfirmed)
@@ -360,7 +360,7 @@ void CzTracker::RemovePending(const uint256& txid)
         mapPendingSpends.erase(ArithToUint256(hashSerial));
 }
 
-bool CzTracker::UpdateStatusInternal(const std::set<uint256>& setMempool, CMintMeta& mint)
+bool CzTracker::UpdateStatusInternal(const std::set<uint256>& setMempool, const std::map<uint256, uint256>& mapMempoolSerials, CMintMeta& mint)
 {
     //! Check whether this mint has been spent and is considered 'pending' or 'confirmed'
     // If there is not a record of the block height, then look it up and assign it
@@ -368,7 +368,9 @@ bool CzTracker::UpdateStatusInternal(const std::set<uint256>& setMempool, CMintM
     bool isMintInChain = pzerocoinDB->ReadCoinMint(mint.hashPubcoin, txidMint);
 
     //See if there is internal record of spending this mint (note this is memory only, would reset on restart)
-    bool isPendingSpend = static_cast<bool>(mapPendingSpends.count(mint.hashSerial));
+    bool isPendingSpendInternal = static_cast<bool>(mapPendingSpends.count(mint.hashSerial));
+    bool isPendingSpendMempool = static_cast<bool>(mapMempoolSerials.count(mint.hashSerial));
+    bool isPendingSpend = isPendingSpendInternal || isPendingSpendMempool;
 
     // See if there is a blockchain record of spending this mint
     uint256 txidSpend;
@@ -376,13 +378,24 @@ bool CzTracker::UpdateStatusInternal(const std::set<uint256>& setMempool, CMintM
 
     // Double check the mempool for pending spend
     if (isPendingSpend) {
-        uint256 txidPendingSpend = mapPendingSpends.at(mint.hashSerial);
-        if (!setMempool.count(txidPendingSpend) || isConfirmedSpend) {
-            RemovePending(txidPendingSpend);
-            isPendingSpend = false;
-            LogPrintf("%s : Pending txid %s removed because not in mempool\n", __func__, txidPendingSpend.GetHex());
+        if (isPendingSpendInternal) {
+            uint256 txidPendingSpend = mapPendingSpends.at(mint.hashSerial);
+
+            // Remove internal pendingspend status if it is confirmed or is not found at all in the mempool
+            if ((!setMempool.count(txidPendingSpend) && !isPendingSpendMempool) || isConfirmedSpend) {
+                RemovePending(txidPendingSpend);
+                isPendingSpend = false;
+                LogPrintf("%s : Pending txid %s removed because not in mempool\n", __func__, txidPendingSpend.GetHex());
+            } else if (isPendingSpendMempool) {
+                // Mempool has this serial in it, but our internal status does not display it as pending spend
+                // This could happen as easily as restarting the application
+                mapPendingSpends.emplace(mint.hashSerial, mapMempoolSerials.at(mint.hashSerial));
+            }
         }
     }
+
+    if (isPendingSpend)
+        mint.nMemFlags |= MINT_PENDINGSPEND;
 
     bool isUsed = isPendingSpend || isConfirmedSpend;
 
@@ -401,11 +414,11 @@ bool CzTracker::UpdateStatusInternal(const std::set<uint256>& setMempool, CMintM
             mint.txid = txidMint;
         }
 
-        if (setMempool.count(mint.txid))
+        if (isPendingSpend)
             return true;
 
         // Check the transaction associated with this mint
-        if (!IsInitialBlockDownload() && !GetTransaction(mint.txid, txRef, Params().GetConsensus(), hashBlock, true)) {
+        if (HeadersAndBlocksSynced() && !GetTransaction(mint.txid, txRef, Params().GetConsensus(), hashBlock, true)) {
             LogPrintf("%s : Failed to find tx for mint txid=%s\n", __func__, mint.txid.GetHex());
             mint.isArchived = true;
             Archive(mint);
@@ -436,6 +449,19 @@ bool CzTracker::UpdateStatusInternal(const std::set<uint256>& setMempool, CMintM
     return false;
 }
 
+uint8_t CzTracker::GetMintMemFlags(const CMintMeta& mint, int nBestHeight, const std::map<libzerocoin::CoinDenomination, int>& mapMaturity)
+{
+    uint8_t nMemFlags = 0;
+    if (mint.nHeight && mint.nHeight <= nBestHeight)
+        nMemFlags |= MINT_CONFIRMED;
+
+    // Not mature
+    if (mapMaturity.count(mint.denom) && mint.nHeight < mapMaturity.at(mint.denom) && mint.nHeight < nBestHeight - Params().Zerocoin_MintRequiredConfirmations())
+        nMemFlags |= MINT_MATURE;
+
+    return nMemFlags;
+}
+
 std::set<CMintMeta> CzTracker::ListMints(bool fUnusedOnly, bool fMatureOnly, bool fUpdateStatus)
 {
     WalletBatch walletdb(*walletDatabase);
@@ -450,22 +476,20 @@ std::set<CMintMeta> CzTracker::ListMints(bool fUnusedOnly, bool fMatureOnly, boo
         for (auto& dMint : listDeterministicDB) {
             Add(dMint);
         }
-        LogPrintf("%s: added %d dzpiv from DB\n", __func__, listDeterministicDB.size());
+        LogPrintf("%s: added %d deterministic zerocoins from DB\n", __func__, listDeterministicDB.size());
     }
 
     std::vector<CMintMeta> vOverWrite;
     std::set<CMintMeta> setMints;
-    std::set<uint256> setMempool;
+    std::set<uint256> setMempoolTx;
+    std::map<uint256, uint256> mapMempoolSerials; //serialhash, txid
     {
         LOCK(mempool.cs);
-        mempool.GetTransactions(setMempool);
+        mempool.GetTransactions(setMempoolTx);
+        mempool.GetSerials(mapMempoolSerials);
     }
 
-    int nBestHeight = 0;
-    {
-        LOCK(cs_main);
-        nBestHeight = chainActive.Height();
-    }
+    int nBestHeight = chainActive.Height();
 
     std::map<libzerocoin::CoinDenomination, int> mapMaturity = GetMintMaturityHeight();
     for (auto& it : mapSerialHashes) {
@@ -476,7 +500,7 @@ std::set<CMintMeta> CzTracker::ListMints(bool fUnusedOnly, bool fMatureOnly, boo
             continue;
 
         // Update the metadata of the mints if requested
-        if (fUpdateStatus && UpdateStatusInternal(setMempool, mint)) {
+        if (fUpdateStatus && UpdateStatusInternal(setMempoolTx, mapMempoolSerials, mint)) {
             if (mint.isArchived)
                 continue;
 
@@ -488,24 +512,11 @@ std::set<CMintMeta> CzTracker::ListMints(bool fUnusedOnly, bool fMatureOnly, boo
             continue;
 
         // Not confirmed
-        bool fInclude = true;
-        if (!mint.nHeight || mint.nHeight > nBestHeight - Params().Zerocoin_MintRequiredConfirmations()) {
-            if (fMatureOnly)
-                fInclude = false;
-        } else {
-            mint.nMemFlags |= MINT_CONFIRMED;
+        mint.nMemFlags = GetMintMemFlags(mint, nBestHeight, mapMaturity);
+        if (fMatureOnly) {
+            if (!(mint.nMemFlags & MINT_CONFIRMED) || !(mint.nMemFlags & MINT_MATURE))
+                continue;
         }
-
-        // Not mature
-        if (!mapMaturity.count(mint.denom) || mint.nHeight >= mapMaturity.at(mint.denom)) {
-            if (fMatureOnly)
-                fInclude = false;
-        } else {
-            mint.nMemFlags |= MINT_MATURE;
-        }
-
-        if (!fInclude)
-            continue;
 
         setMints.insert(mint);
     }
@@ -515,6 +526,30 @@ std::set<CMintMeta> CzTracker::ListMints(bool fUnusedOnly, bool fMatureOnly, boo
         UpdateState(meta);
 
     return setMints;
+}
+
+
+CoinWitnessData* CzTracker::GetSpendCache(const uint256& hashStake)
+{
+    AssertLockHeld(cs_spendcache);
+    if (!mapStakeCache.count(hashStake)) {
+        std::unique_ptr<CoinWitnessData> uptr(new CoinWitnessData());
+        mapStakeCache.insert(std::make_pair(hashStake, std::move(uptr)));
+        return mapStakeCache.at(hashStake).get();
+    }
+
+    return mapStakeCache.at(hashStake).get();
+}
+
+bool CzTracker::ClearSpendCache()
+{
+    AssertLockHeld(cs_spendcache);
+    if (!mapStakeCache.empty()) {
+        mapStakeCache.clear();
+        return true;
+    }
+
+    return false;
 }
 
 void CzTracker::Clear()

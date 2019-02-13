@@ -5,6 +5,7 @@
 #include <core_io.h>
 
 #include <veil/ringct/blind.h>
+#include <veil/zerocoin/zchain.h>
 #include <consensus/consensus.h>
 #include <consensus/validation.h>
 #include <key_io.h>
@@ -155,13 +156,17 @@ void AddRangeproof(const std::vector<uint8_t> &vRangeproof, UniValue &entry)
 }
 
 void OutputToJSON(uint256 &txid, int i,
-                  const CTxOutBase *baseOut, UniValue &entry)
+                  const CTxOutBase *baseOut, UniValue &entry, bool isCoinBase = false)
 {
     switch (baseOut->GetType())
     {
         case OUTPUT_STANDARD:
         {
-            entry.pushKV("type", "standard");
+            if (isCoinBase && i == 0) {
+                entry.pushKV("type", "coinbase");
+            } else {
+                entry.pushKV("type", "standard");
+            }
             CTxOutStandard *s = (CTxOutStandard*) baseOut;
             entry.pushKV("value", ValueFromAmount(s->nValue));
             entry.pushKV("valueSat", s->nValue);
@@ -276,6 +281,15 @@ void TxToUniv(const CTransaction& tx, const uint256& hashBlock, UniValue& entry,
             in.pushKV("ring_size", (int) nSigRingSize);
         } else {
             in.pushKV("txid", txin.prevout.hash.GetHex());
+            if (txin.scriptSig.IsZerocoinSpend()) {
+                in.pushKV("type", "zerocoinspend");
+                in.pushKV("denomination", FormatMoney(txin.GetZerocoinSpent()));
+                std::vector<char, zero_after_free_allocator<char> > dataTxIn;
+                dataTxIn.insert(dataTxIn.end(), txin.scriptSig.begin() + 4, txin.scriptSig.end());
+                CDataStream serializedCoinSpend(dataTxIn, SER_NETWORK, PROTOCOL_VERSION);
+                libzerocoin::CoinSpend spend(Params().Zerocoin_Params(), serializedCoinSpend);
+                in.pushKV("serial", spend.getCoinSerialNumber().GetHex());
+            }
             in.pushKV("vout", (int64_t)txin.prevout.n);
             UniValue o(UniValue::VOBJ);
             o.pushKV("asm", ScriptToAsmStr(txin.scriptSig, true));
@@ -299,7 +313,7 @@ void TxToUniv(const CTransaction& tx, const uint256& hashBlock, UniValue& entry,
     for (unsigned int i = 0; i < tx.vpout.size(); i++) {
         const auto& pout = tx.vpout[i];
         UniValue out(UniValue::VOBJ);
-        OutputToJSON(txid, i, pout.get(), out);
+        OutputToJSON(txid, i, pout.get(), out, tx.IsCoinBase());
         vout.push_back(out);
     }
 

@@ -9,6 +9,8 @@
 #include <qt/optionsmodel.h>
 #include <QIntValidator>
 
+#include <QSettings>
+#include <QStandardPaths>
 #include <QString>
 #include <iostream>
 #include <qt/veil/qtutils.h>
@@ -23,9 +25,7 @@ SettingsMinting::SettingsMinting(QWidget *parent, WalletView *mainWindow, Wallet
     ui->btnEsc->setProperty("cssClass" , "btn-text-primary-inactive");
     ui->useBasecoin->setProperty("cssClass" , "btn-check");
 
-    ui->btnSendMint->setProperty("cssClass" , "btn-text-primary");
-    ui->btnSendMint->setText("MINT");
-
+    ui->btnMint->setProperty("cssClass" , "btn-text-primary");
 
     ui->btnEsc->setProperty("cssClass" , "btn-text-primary-inactive");
 
@@ -40,6 +40,7 @@ SettingsMinting::SettingsMinting(QWidget *parent, WalletView *mainWindow, Wallet
     ui->labelZVeilBalance->setText(BitcoinUnits::formatWithUnit(unit, balances.zerocoin_balance, false, BitcoinUnits::separatorAlways));
     ui->labelConvertableCt->setText(BitcoinUnits::formatWithUnit(unit,balances.ct_balance, false, BitcoinUnits::separatorAlways));
     ui->labelConvertableBasecoin->setText(BitcoinUnits::formatWithUnit(unit,balances.basecoin_balance, false, BitcoinUnits::separatorAlways));
+    ui->labelConvertibleRingCt->setText(BitcoinUnits::formatWithUnit(unit,balances.ring_ct_balance, false, BitcoinUnits::separatorAlways));
 
     switch (nPreferredDenom){
         case 10:
@@ -51,7 +52,7 @@ SettingsMinting::SettingsMinting(QWidget *parent, WalletView *mainWindow, Wallet
         case 1000:
             ui->radioButton1000->setChecked(true);
             break;
-        case 100000:
+        case 10000:
             ui->radioButton100000->setChecked(true);
             break;
     }
@@ -154,28 +155,35 @@ void SettingsMinting::mintzerocoins(){
 void SettingsMinting::onCheck10Clicked(bool res) {
     if(res && nPreferredDenom != 10){
         nPreferredDenom = 10;
+        saveSettings(nPreferredDenom);
     }
 }
 
 void SettingsMinting::onCheck100Clicked(bool res){
     if(res && nPreferredDenom != 100){
         nPreferredDenom = 100;
+        saveSettings(nPreferredDenom);
     }
 }
 
 void SettingsMinting::onCheck1000Clicked(bool res){
     if(res && nPreferredDenom != 1000){
         nPreferredDenom = 1000;
+        saveSettings(nPreferredDenom);
     }
 }
 
 void SettingsMinting::onCheck100000Clicked(bool res){
     if(res && nPreferredDenom != 10000){
         nPreferredDenom = 10000;
+        saveSettings(nPreferredDenom);
     }
 }
 
-void SettingsMinting::onEscapeClicked(){
+void SettingsMinting::saveSettings(int prefDenom){
+    QSettings* settings = getSettings();
+    settings->setValue("nAutomintDenom", prefDenom);
+    settings->sync();
 }
 
 SettingsMinting::~SettingsMinting()

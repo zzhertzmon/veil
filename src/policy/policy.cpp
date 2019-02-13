@@ -135,10 +135,19 @@ bool IsStandardTx(const CTransaction& tx, std::string& reason)
         return false;
     }
 
-    for (const CTxIn& txin : tx.vin)
+    bool fZerocoinSpend = false;
+    for (unsigned int i = 0; i < tx.vin.size(); i++)
     {
-        if (txin.scriptSig.IsZerocoinSpend())
+        const CTxIn& txin = tx.vin[i];
+        if (txin.scriptSig.IsZerocoinSpend()) {
+            if (!fZerocoinSpend && i > 0) {
+                reason = "malformed-zerocoinspend";
+                return false;
+            }
+            fZerocoinSpend = true;
             continue;
+        }
+
 
         // Biggest 'standard' txin is a 15-of-15 P2SH multisig with compressed
         // keys (remember the 520 byte limit on redeemScript size). That works
@@ -213,7 +222,7 @@ bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
 
     for (unsigned int i = 0; i < tx.vin.size(); i++)
     {
-        if (tx.vin[i].scriptSig.IsZerocoinSpend())
+        if (tx.vin[i].scriptSig.IsZerocoinSpend() || tx.vin[i].IsAnonInput())
             continue;
 
         const CTxOut& prev = mapInputs.AccessCoin(tx.vin[i].prevout).out;
@@ -254,6 +263,19 @@ bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
         // If the script is invalid without witness, it would be caught sooner or later during validation.
         if (tx.vin[i].scriptWitness.IsNull())
             continue;
+
+        if (tx.vin[i].IsAnonInput())
+        {
+            size_t sizeWitnessStack = tx.vin[i].scriptWitness.stack.size();
+            if (sizeWitnessStack > 3)
+                return false;
+            for (unsigned int j = 0; j < sizeWitnessStack; j++)
+            {
+                if (tx.vin[i].scriptWitness.stack[j].size() > 4096) // TODO: max limits?
+                    return false;
+            };
+            continue;
+        };
 
         const CTxOut &prev = mapInputs.AccessCoin(tx.vin[i].prevout).out;
 

@@ -120,6 +120,10 @@ const CLogCategoryDesc LogCategories[] =
     {BCLog::QT, "qt"},
     {BCLog::LEVELDB, "leveldb"},
     {BCLog::ZEROCOINDB, "zerocoindb"},
+    {BCLog::BLOCKCREATION, "blockcreation"},
+    {BCLog::PRECOMPUTE, "precompute"},
+    {BCLog::CHAINSCORE, "chainscore"},
+    {BCLog::STAGING, "staging"},
     {BCLog::ALL, "1"},
     {BCLog::ALL, "all"},
 };

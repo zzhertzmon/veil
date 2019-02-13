@@ -53,6 +53,9 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <veil/ringct/anon.h>
+#include <veil/zerocoin/witness.h>
+#include <veil/zerocoin/zchain.h>
+#include <wallet/wallet.h>
 
 #ifndef WIN32
 #include <signal.h>
@@ -248,6 +251,9 @@ void Shutdown()
         DumpMempool();
     }
 
+    // Try to dump the precomputes on shutdown
+    DumpPrecomputes();
+
     if (fFeeEstimatesInitialized)
     {
         ::feeEstimator.FlushUnconfirmed();
@@ -285,6 +291,7 @@ void Shutdown()
         pcoinsdbview.reset();
         pblocktree.reset();
         pzerocoinDB.reset();
+        pprecomputeDB.reset();
     }
     g_wallet_init_interface.Stop();
 
@@ -411,6 +418,7 @@ void SetupServerArgs()
             "(default: 0 = disable pruning blocks, 1 = allow manual pruning via RPC, >=%u = automatically prune block files to stay under the specified target size in MiB)", MIN_DISK_SPACE_FOR_BLOCK_FILES / 1024 / 1024), false, OptionsCategory::OPTIONS);
     gArgs.AddArg("-reindex", "Rebuild chain state and block index from the blk*.dat files on disk", false, OptionsCategory::OPTIONS);
     gArgs.AddArg("-reindex-chainstate", "Rebuild chain state from the currently indexed blocks", false, OptionsCategory::OPTIONS);
+    gArgs.AddArg("-reindex-zdb", "Rebuild zerocoin blockchain database", false, OptionsCategory::OPTIONS);
     gArgs.AddArg("-resync", "Delete blockchain folders and resync from scratch", false, OptionsCategory::OPTIONS);
 #ifndef WIN32
     gArgs.AddArg("-sysperms", "Create new files with system default permissions, instead of umask 077 (only effective with disabled wallet functionality)", false, OptionsCategory::OPTIONS);
@@ -418,6 +426,7 @@ void SetupServerArgs()
     hidden_args.emplace_back("-sysperms");
 #endif
     gArgs.AddArg("-txindex", strprintf("Maintain a full transaction index, used by the getrawtransaction rpc call (default: %u)", DEFAULT_TXINDEX), false, OptionsCategory::OPTIONS);
+    gArgs.AddArg("-threadbatchverify", strprintf("How many threads to run when batch verifying zeroknowledge proofs (default: %u)", DEFAULT_BATCHVERIFY_THREADS), false, OptionsCategory::OPTIONS);
 
     gArgs.AddArg("-addnode=<ip>", "Add a node to connect to and attempt to keep the connection open (see the `addnode` RPC command help for more info). This option can be specified multiple times to add multiple nodes.", false, OptionsCategory::CONNECTION);
     gArgs.AddArg("-banscore=<n>", strprintf("Threshold for disconnecting misbehaving peers (default: %u)", DEFAULT_BANSCORE_THRESHOLD), false, OptionsCategory::CONNECTION);
@@ -522,6 +531,8 @@ void SetupServerArgs()
     gArgs.AddArg("-whitelistforcerelay", strprintf("Force relay of transactions from whitelisted peers even if they violate local relay policy (default: %d)", DEFAULT_WHITELISTFORCERELAY), false, OptionsCategory::NODE_RELAY);
     gArgs.AddArg("-whitelistrelay", strprintf("Accept relayed transactions received from whitelisted peers even when not relaying transactions (default: %d)", DEFAULT_WHITELISTRELAY), false, OptionsCategory::NODE_RELAY);
 
+    // default denom
+    gArgs.AddArg("-nautomintdenom=<n>", strprintf("Set preffered automint denomination (default: %d)", DEFAULT_AUTOMINT_DENOM), false, OptionsCategory::WALLET);
 
     gArgs.AddArg("-blockmaxweight=<n>", strprintf("Set maximum BIP141 block weight (default: %d)", DEFAULT_BLOCK_MAX_WEIGHT), false, OptionsCategory::BLOCK_CREATION);
     gArgs.AddArg("-blockmintxfee=<amt>", strprintf("Set lowest fee rate (in %s/kB) for transactions to be included in block creation. (default: %s)", CURRENCY_UNIT, FormatMoney(DEFAULT_BLOCK_MIN_TX_FEE)), false, OptionsCategory::BLOCK_CREATION);
@@ -1536,6 +1547,10 @@ bool AppInitMain()
                 pzerocoinDB.reset();
                 pzerocoinDB.reset(new CZerocoinDB(0, false, fReindex));
 
+                //zerocoinDB
+                pprecomputeDB.reset();
+                pprecomputeDB.reset(new CPrecomputeDB(0, false, false));
+
                 if (fReset) {
                     pblocktree->WriteReindexing(true);
                     //If we're reindexing in prune mode, wipe away unusable block files and all undo data files
@@ -1641,6 +1656,14 @@ bool AppInitMain()
                         break;
                     }
                 }
+
+                if (gArgs.GetBoolArg("-reindex-zdb", false)) {
+                    std::string strRet = ReindexZerocoinDB();
+                    if (strRet != "") {
+                        strLoadError = _(strRet.c_str());
+                        break;
+                    }
+                }
             } catch (const std::exception& e) {
                 LogPrintf("%s\n", e.what());
                 strLoadError = _("Error opening block database");
@@ -1694,6 +1717,16 @@ bool AppInitMain()
 
     // ********************************************************* Step 9: load wallet
     if (!g_wallet_init_interface.Open()) return false;
+
+
+    // Automint denom
+    if(nPreferredDenom == DEFAULT_AUTOMINT_DENOM) {
+        nPreferredDenom = gArgs.GetArg("-nautomintdenom", DEFAULT_AUTOMINT_DENOM);
+        if(nPreferredDenom != 10 && nPreferredDenom != 100 && nPreferredDenom != 1000 && nPreferredDenom != 10000){
+            nPreferredDenom = DEFAULT_AUTOMINT_DENOM;
+        }
+    }
+
 
     // ********************************************************* Step 10: data directory maintenance
 
@@ -1852,7 +1885,8 @@ bool AppInitMain()
         threadGroupStaking.create_thread(&ThreadStakeMiner);
 
     //Start block staging thread
-    threadGroupStaging.create_thread(&ThreadStaging);
+    threadGroupStaging.create_thread(&ThreadStagingBlockProcessing);
+    threadGroupStaging.create_thread(&ThreadStagingBatchVerify);
 
     LinkPoWThreadGroup(&threadGroupPoWMining);
 
@@ -1878,6 +1912,11 @@ bool AppInitMain()
 
             GenerateBitcoins(true, nThreads, coinbase_script);
         }
+    }
+
+    if (gArgs.GetBoolArg("-precompute", true)) {
+        // Run a thread to precompute any zPIV spends
+        threadGroup.create_thread(boost::bind(&ThreadPrecomputeSpends));
     }
 
     return true;

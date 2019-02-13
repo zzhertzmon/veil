@@ -11,6 +11,7 @@
 #include <rpc/util.h>
 #include <utilmoneystr.h>
 #include <validation.h>
+#include <veil/zerocoin/accumulators.h>
 #include <veil/zerocoin/zwallet.h>
 #include <veil/zerocoin/zchain.h>
 #include <veil/ringct/transactionrecord.h>
@@ -25,6 +26,113 @@
 #include <boost/thread.hpp>
 
 #include <memory>
+
+UniValue MintMetaToUniValue(const CMintMeta& mint)
+{
+    std::map<libzerocoin::CoinDenomination, int> mapMaturity = GetMintMaturityHeight();
+    int nMemFlags = CzTracker::GetMintMemFlags(mint, chainActive.Height(), mapMaturity);
+
+    UniValue m(UniValue::VOBJ);
+    m.push_back(Pair("txid", mint.txid.GetHex()));
+    m.push_back(Pair("height", (double)mint.nHeight));
+    m.push_back(Pair("value", ValueFromAmount(libzerocoin::ZerocoinDenominationToAmount(mint.denom))));
+    m.push_back(Pair("pubcoinhash", mint.hashPubcoin.GetHex()));
+    m.push_back(Pair("serialhash", mint.hashSerial.GetHex()));
+    m.pushKV("is_spent", mint.isUsed);
+    m.pushKV("is_archived", mint.isArchived);
+    m.pushKV("flags", nMemFlags);
+    return m;
+}
+
+UniValue lookupzerocoin(const JSONRPCRequest& request)
+{
+    std::shared_ptr<CWallet> const wallet = GetWalletForJSONRPCRequest(request);
+    CWallet* const pwallet = wallet.get();
+
+    if (!EnsureWalletIsAvailable(pwallet, request.fHelp)) {
+        return NullUniValue;
+    }
+
+    UniValue params = request.params;
+
+    if (request.fHelp || params.size() < 1 || params.size() > 3)
+        throw std::runtime_error(
+                "lookupzerocoin identifier_type identifier\n"
+                "\nLookup a zerocoin held by the wallet\n"
+                "\nArguments:\n"
+                "1. id_type   (string, required) <serial, serialhash, pubcoin, pubcoinhash>\n"
+                "2. id        (string, required) The id associated with id_type"
+                "setting to true will result in loss of privacy and can reveal information about your wallet to the public!!\n"
+
+                "\nResult:\n"
+                "[\n"
+                "  {\n"
+                "    \"txid\": \"xxx\",         (string) Transaction ID.\n"
+                "    \"height\": \"xxx\",       (numeric) Height mint added to chain.\n"
+                "    \"value\": amount,       (numeric) Denomination amount.\n"
+                "    \"pubcoinhash\": \"xxx\",  (string) Hash of pubcoin in hex format.\n"
+                "    \"serialhash\": \"xxx\",   (string) Hash of serial in hex format.\n"
+                "    \"is_spent\": \"xxx\",     (bool) Whether the coin has been spent.\n"
+                "    \"is_archived\": nnn       (bool) Whether the coin has been archived by the wallet (considered an orphan or invalid).\n"
+                "  }\n"
+                "  ,...\n"
+                "]\n" +
+                HelpExampleCli("lookupzerocoin", "pubcoinhash f468259db68b913dadb8ed2b07631e56670dc3e1ab0ee73a71b0db6d19fc73a9") +
+                "\nAs a json rpc call\n" +
+                HelpExampleRpc("lookupzerocoin", "pubcoinhash f468259db68b913dadb8ed2b07631e56670dc3e1ab0ee73a71b0db6d19fc73a9"));
+
+    LOCK2(cs_main, pwallet->cs_wallet);
+
+    auto ztracker = pwallet->GetZTrackerPointer();
+
+    std::string strType = request.params[0].get_str();
+    std::string strID = request.params[1].get_str();
+
+    uint256 hashSerial = uint256();
+    CMintMeta mint;
+    if (strType == "serial") {
+        CBigNum bnSerial;
+        bnSerial.SetHex(strID);
+        hashSerial = GetSerialHash(bnSerial);
+    } else if (strType == "serialhash") {
+        hashSerial = uint256S(strID);
+    }
+
+    uint256 hashPubcoin = uint256();
+    if (hashSerial != uint256()) {
+        mint = ztracker->Get(hashSerial);
+    } else if (strType == "pubcoin") {
+        CBigNum bnPubcoin;
+        bnPubcoin.SetHex(strID);
+        hashPubcoin = GetPubCoinHash(bnPubcoin);
+    } else if (strType == "pubcoinhash") {
+        hashPubcoin = uint256S(strID);
+    } else {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "param 1 id_type is invalid");
+    }
+
+    if (hashPubcoin != uint256())
+        mint = ztracker->GetMetaFromPubcoin(hashPubcoin);
+
+    // Search archived coins if not found yet
+    if (mint.hashSerial == uint256()) {
+        //Check if it is archived
+        std::list<CDeterministicMint> listDMints = WalletBatch(pwallet->GetDBHandle()).ListArchivedDeterministicMints();
+        bool found = false;
+        for (const auto& dmint : listDMints) {
+            if (dmint.GetSerialHash() == hashSerial || dmint.GetPubcoinHash() == hashPubcoin) {
+                mint = dmint.ToMintMeta();
+                mint.isArchived = true;
+                found = true;
+                break;
+            }
+        }
+        if (!found)
+            throw JSONRPCError(RPC_WALLET_NOT_FOUND, "could not find zerocoin in wallet");
+    }
+
+    return MintMetaToUniValue(mint);
+}
 
 UniValue mintzerocoin(const JSONRPCRequest& request)
 {
@@ -171,9 +279,9 @@ UniValue spendzerocoin(const JSONRPCRequest& request)
 
     UniValue params = request.params;
 
-    if (request.fHelp || params.size() > 5 || params.size() < 4)
+    if (request.fHelp || params.size() > 6 || params.size() < 4)
         throw std::runtime_error(
-                "spendzerocoin amount mintchange minimizechange securitylevel ( \"address\" )\n"
+                "spendzerocoin amount mintchange minimizechange securitylevel d( \"address\" denomination)\n"
                 "\nSpend zerocoin to a veil address.\n"
                 "\nArguments:\n"
                 "1. amount          (numeric, required) Amount to spend.\n"
@@ -186,6 +294,7 @@ UniValue spendzerocoin(const JSONRPCRequest& request)
                 "                       Adding more checkpoints makes the minting process take longer\n"
                 "5. \"address\"     (string, optional, default=change) Send to specified address or to a new change address.\n"
                 "                       If there is change then an address is required\n"
+                "6. denomination    (numeric, optional) Only select from a specific zerocoin denomination\n"
 
                 "\nResult:\n"
                 "{\n"
@@ -223,20 +332,27 @@ UniValue spendzerocoin(const JSONRPCRequest& request)
     int nSecurityLevel = params[3].get_int();       // Security level
 
     CTxDestination dest; // Optional sending address. Dummy initialization here.
-    if (params.size() == 5) {
+    if (params.size() > 4) {
         // Destination address was supplied as request[4]. Optional parameters MUST be at the end
         // to avoid type confusion from the JSON interpreter
         dest = DecodeDestination(params[4].get_str());
+    }
+
+    libzerocoin::CoinDenomination denomFilter = libzerocoin::CoinDenomination::ZQ_ERROR;
+    if (params.size() > 5) {
+        denomFilter = libzerocoin::IntToZerocoinDenomination(params[5].get_int());
+        if (denomFilter == libzerocoin::CoinDenomination::ZQ_ERROR)
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Could not parse denomination");
     }
 
     std::vector<CZerocoinMint> vMintsSelected;
     CZerocoinSpendReceipt receipt;
     bool fSuccess;
 
-    if(params.size() == 5) // Spend to supplied destination address
-        fSuccess = pwallet->SpendZerocoin(nAmount, nSecurityLevel, receipt, vMintsSelected, fMintChange, fMinimizeChange, &dest);
+    if(params.size() > 4) // Spend to supplied destination address
+        fSuccess = pwallet->SpendZerocoin(nAmount, nSecurityLevel, receipt, vMintsSelected, fMintChange, fMinimizeChange, denomFilter, &dest);
     else                   // Spend to newly generated local address
-        fSuccess = pwallet->SpendZerocoin(nAmount, nSecurityLevel, receipt, vMintsSelected, fMintChange, fMinimizeChange);
+        fSuccess = pwallet->SpendZerocoin(nAmount, nSecurityLevel, receipt, vMintsSelected, fMintChange, fMinimizeChange, denomFilter);
 
     if (!fSuccess)
         throw JSONRPCError(RPC_WALLET_ERROR, receipt.GetStatusMessage());
@@ -398,7 +514,9 @@ UniValue listmintedzerocoins(const JSONRPCRequest& request)
 
     EnsureWalletIsUnlocked(pwallet);
 
-   // WalletBatch walletdb(pwallet->GetDBHandle());
+    auto zwallet = pwallet->GetZWallet();
+    zwallet->SyncWithChain(false);
+
     set<CMintMeta> setMints = pwallet->ListMints(true, fMatureOnly, true);
 
     int nBestHeight = chainActive.Height();
@@ -517,9 +635,9 @@ UniValue DoZerocoinSpend(CWallet* pwallet, const CAmount nAmount, bool fMintChan
         dest = CBitcoinAddress(address_str).Get();
         if(!address.IsValid())
             throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid VEIL address");
-        fSuccess = pwallet->SpendZerocoin(nAmount, nSecurityLevel, receipt, vMintsSelected, fMintChange, fMinimizeChange, &dest);
+        fSuccess = pwallet->SpendZerocoin(nAmount, nSecurityLevel, receipt, vMintsSelected, fMintChange, fMinimizeChange, libzerocoin::CoinDenomination::ZQ_ERROR, &dest);
     } else                   // Spend to newly generated local address
-        fSuccess = pwallet->SpendZerocoin(nAmount, nSecurityLevel, receipt, vMintsSelected, fMintChange, fMinimizeChange);
+        fSuccess = pwallet->SpendZerocoin(nAmount, nSecurityLevel, receipt, vMintsSelected, fMintChange, fMinimizeChange, libzerocoin::CoinDenomination::ZQ_ERROR);
 
     if (!fSuccess)
         throw JSONRPCError(RPC_WALLET_ERROR, receipt.GetStatusMessage());
@@ -714,7 +832,7 @@ UniValue ResetSpends(CWallet* pwallet)
             if (meta.hashSerial == GetSerialHash(spend.GetSerial())) {
                 zTracker->SetPubcoinNotUsed(meta.hashPubcoin);
                 walletdb.EraseZerocoinSpendSerialEntry(spend.GetSerial());
-                RemoveSerialFromDB(spend.GetSerial());
+                //RemoveSerialFromDB(spend.GetSerial());
                 UniValue obj(UniValue::VOBJ);
                 obj.push_back(Pair("serial", spend.GetSerial().GetHex()));
                 arrRestored.push_back(obj);
@@ -1189,19 +1307,20 @@ UniValue generatemintlist(const JSONRPCRequest& request)
 
     int nCount = params[0].get_int();
     int nRange = params[1].get_int();
-    if (pwallet->getZWallet()->HasEmptySeed())
+    if (pwallet->GetZWallet()->HasEmptySeed())
         throw JSONRPCError(RPC_WALLET_ERROR, "Zerocoin seed is not loaded");
 
-    CKeyID seedID = pwallet->getZWallet()->GetMasterSeedID();
+    CKeyID seedID = pwallet->GetZWallet()->GetMasterSeedID();
     UniValue arrRet(UniValue::VARR);
     for (int i = nCount; i < nCount + nRange; i++) {
         libzerocoin::CoinDenomination denom = libzerocoin::CoinDenomination::ZQ_TEN;
         libzerocoin::PrivateCoin coin(Params().Zerocoin_Params(), denom, false);
         CDeterministicMint dMint;
-        pwallet->getZWallet()->GenerateMint(seedID, i, denom, coin, dMint);
+        pwallet->GetZWallet()->GenerateMint(seedID, i, denom, coin, dMint);
         UniValue obj(UniValue::VOBJ);
         obj.push_back(Pair("count", i));
         obj.push_back(Pair("value", coin.getPublicCoin().getValue().GetHex()));
+        obj.push_back(Pair("pubcoinhash", GetPubCoinHash(coin.getPublicCoin().getValue()).GetHex()));
         obj.push_back(Pair("randomness", coin.getRandomness().GetHex()));
         obj.push_back(Pair("serial", coin.getSerialNumber().GetHex()));
         arrRet.push_back(obj);
@@ -1209,6 +1328,49 @@ UniValue generatemintlist(const JSONRPCRequest& request)
 
     return arrRet;
 }
+
+UniValue showspendcaching(const JSONRPCRequest& request)
+{
+    std::shared_ptr<CWallet> const wallet = GetWalletForJSONRPCRequest(request);
+    CWallet* const pwallet = wallet.get();
+    if (!EnsureWalletIsAvailable(pwallet, request.fHelp))
+        return NullUniValue;
+    UniValue params = request.params;
+    if(request.fHelp || params.size() != 0)
+        throw runtime_error(
+                "generatemintlist\n"
+                "\nShow spendable zerocoins and their precomputed zero knowledge proof status\n" +
+                HelpRequiringPassphrase(pwallet));
+
+    EnsureWalletIsUnlocked(pwallet);
+
+    auto ztracker = pwallet->GetZTrackerPointer();
+
+    std::set<CMintMeta> setMints = ztracker->ListMints(true, true, false);
+    UniValue arrRet(UniValue::VARR);
+    int nHeightChain = chainActive.Height();
+    for (const CMintMeta& mint : setMints) {
+        UniValue obj(UniValue::VOBJ);
+        obj.pushKV("pubcoinhash", mint.hashPubcoin.GetHex());
+        obj.pushKV("height_from", mint.nHeight);
+
+        CoinWitnessData* witnessData = ztracker->GetSpendCache(mint.hashStake);
+        if (!witnessData)
+            continue;
+
+        obj.pushKV("computed_to", witnessData->nHeightAccEnd);
+        double nTotalToAccumulate = nHeightChain - mint.nHeight;
+        double nAccumulated = witnessData->nHeightAccEnd - mint.nHeight;
+        double nComputePercent = nAccumulated/nTotalToAccumulate;
+        if (nComputePercent < 0)
+            nComputePercent = 0;
+        obj.pushKV("percent_precompute", nComputePercent);
+        arrRet.push_back(obj);
+    }
+
+    return arrRet;
+}
+
 
 UniValue deterministiczerocoinstate(const JSONRPCRequest& request)
 {
@@ -1234,7 +1396,7 @@ UniValue deterministiczerocoinstate(const JSONRPCRequest& request)
                                             "\nExamples\n" +
                 HelpExampleCli("deterministiczerocoinstate", "") + HelpExampleRpc("deterministiczerocoinstate", ""));
 
-    CzWallet* zwallet = pwallet->getZWallet();
+    CzWallet* zwallet = pwallet->GetZWallet();
     UniValue obj(UniValue::VOBJ);
     int nCount, nCountLastUsed;
     zwallet->GetState(nCount, nCountLastUsed);
@@ -1245,6 +1407,8 @@ UniValue deterministiczerocoinstate(const JSONRPCRequest& request)
 
     return obj;
 }
+
+
 
 void static SearchThread(CzWallet* zwallet, int nCountStart, int nCountEnd)
 {
@@ -1315,7 +1479,7 @@ UniValue searchdeterministiczerocoin(const JSONRPCRequest& request)
     if (nThreads < 1)
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Threads has to be at least 1");
 
-    CzWallet* zwallet = pwallet->getZWallet();
+    CzWallet* zwallet = pwallet->GetZWallet();
 
     boost::thread_group* dzThreads = new boost::thread_group();
     int nRangePerThread = nRange / nThreads;
@@ -1341,7 +1505,7 @@ static const CRPCCommand commands[] =
 {
      //  category              name                                actor (function)                argNames
     //  --------------------- ------------------------          -----------------------         ----------
-    { "zerocoin",           "spendzerocoin",                    &spendzerocoin,                 {"amount", "mintchange", "minimizechange", "securitylevel", "address"} },
+    { "zerocoin",           "spendzerocoin",                    &spendzerocoin,                 {"amount", "mintchange", "minimizechange", "securitylevel", "address", "denomination"} },
     { "zerocoin",           "mintzerocoin",                     &mintzerocoin,                  {"amount", "utxos"} },
     { "zerocoin",           "searchdeterministiczerocoin",      &searchdeterministiczerocoin,   {"count", "range", "threads"} },
     { "zerocoin",           "deterministiczerocoinstate",       &deterministiczerocoinstate,    {} },
@@ -1357,7 +1521,9 @@ static const CRPCCommand commands[] =
     { "zerocoin",           "listspentzerocoins",               &listspentzerocoins,            {} },
     { "zerocoin",           "listzerocoinamounts",              &listzerocoinamounts,           {} },
     { "zerocoin",           "listmintedzerocoins",              &listmintedzerocoins,           {"fVerbose", "vMatureOnly"} },
+    { "zerocoin",           "lookupzerocoin",                   &lookupzerocoin,                {"id_type", "id"} },
     { "zerocoin",           "getzerocoinbalance",               &getzerocoinbalance,            {} },
+    { "zerocoin",           "showspendcaching",               &showspendcaching,            {} },
 };
 
 

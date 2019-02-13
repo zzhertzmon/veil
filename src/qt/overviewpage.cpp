@@ -21,6 +21,7 @@
 
 #include <QAbstractItemDelegate>
 #include <QPainter>
+#include <QSettings>
 
 #define DECORATION_SIZE 54
 #define NUM_ITEMS 3
@@ -46,6 +47,9 @@ public:
         QIcon icon = qvariant_cast<QIcon>(index.data(TransactionTableModel::RawDecorationRole));
         QRect mainRect = option.rect;
         QRect decorationRect(mainRect.topLeft(), QSize(DECORATION_SIZE, DECORATION_SIZE));
+
+
+        QString feeStr = index.data(TransactionTableModel::FeeRole).toString();
 
 
         QColor foreground;
@@ -75,9 +79,9 @@ public:
         int ypad = 6;
         int halfheight = (mainRect.height() - 2*ypad)/2;
         QRect amountRect(mainRect.left() + xspace, mainRect.top()+ypad, mainRect.width() - xspace - 16, halfheight);
-        QRect dateRect(mainRect.left() + xspace, mainRect.top()+ypad+halfheight, mainRect.width() - xspace - 16, halfheight);
-        QRect addressRect(mainRect.left() + decorationSize + ypad  + 16, mainRect.top()+(halfheight - ypad), mainRect.width() - xspace, halfheight);
-        //icon = platformStyle->SingleColorIcon(icon);
+        QRect dateRect(mainRect.left() + decorationSize + ypad  + 18, mainRect.top()+ ypad + halfheight, mainRect.width() - xspace - 16, halfheight);
+        QRect addressRect(mainRect.left() + decorationSize + ypad  + 16, mainRect.top()+( (halfheight/1.5) - ypad), mainRect.width() - xspace, halfheight);
+        QRect feeRect(mainRect.left() + xspace, mainRect.top()+ypad+halfheight, mainRect.width() - xspace - 16, halfheight);
         icon.paint(painter, decorationRect1);
 
         QDateTime date = index.data(TransactionTableModel::DateRole).toDateTime();
@@ -118,7 +122,7 @@ public:
         QFont fontTemp = painter->font() ;
         QFont font = painter->font() ;
         /* twice the size than the current font size */
-        font.setPointSize(14);
+        font.setPointSize(15);
 
         /* set the modified font to the painter */
         painter->setFont(font);
@@ -149,8 +153,19 @@ public:
         painter->drawText(amountRect, Qt::AlignRight|Qt::AlignVCenter, amountText);
 
         // Draw the date
-        painter->setPen(QColor("#707070"));//option.palette.color(QPalette::Text));
-        painter->drawText(dateRect, Qt::AlignRight|Qt::AlignVCenter, GUIUtil::dateTimeStr(date));
+        painter->setPen(QColor("#707070"));
+
+        /* twice the size than the current font size */
+        font.setPointSize(14);
+        /* set the modified font to the painter */
+        painter->setFont(font);
+
+        QString dateStr = "  " + GUIUtil::dateTimeStr(date);
+        painter->drawText(dateRect, Qt::AlignLeft|Qt::AlignVCenter, dateStr);
+
+        // fee
+        painter->drawText(feeRect, Qt::AlignRight|Qt::AlignVCenter, feeStr);
+
 
         // Separator
         QPen _gridPen = QPen(COLOR_UNCONFIRMED, 0, Qt::SolidLine);
@@ -317,6 +332,7 @@ void OverviewPage::setWalletModel(WalletModel *model)
 
         // Keep up to date with wallet
         connect(model->getOptionsModel(), SIGNAL(displayUnitChanged(int)), this, SLOT(updateDisplayUnit()));
+        connect(model->getOptionsModel(), SIGNAL(hideOrphansChanged(bool)), this, SLOT(hideOrphans(bool)));
 
         updateWatchOnlyLabels(wallet.haveWatchOnly());
         connect(model, SIGNAL(notifyWatchonlyChanged(bool)), this, SLOT(updateWatchOnlyLabels(bool)));
@@ -324,6 +340,10 @@ void OverviewPage::setWalletModel(WalletModel *model)
 
     // update the display unit, to not use the default ("VEIL")
     updateDisplayUnit();
+
+    // Hide orphans
+    QSettings settings;
+    hideOrphans(settings.value("bHideOrphans", true).toBool());
 }
 
 void OverviewPage::updateTxesView(){
@@ -364,4 +384,14 @@ void OverviewPage::onFaqClicked(){
     mainWindow->getGUI()->showHide(true);
     SettingsFaq *dialog = new SettingsFaq(mainWindow->getGUI());
     openDialogWithOpaqueBackgroundFullScreen(dialog, mainWindow->getGUI());
+}
+
+void OverviewPage::hideOrphans(bool fHide)
+{
+    filter->setHideOrphans(fHide);
+}
+
+void OverviewPage::showEvent(QShowEvent *event){
+    QSettings settings;
+    hideOrphans(settings.value("bHideOrphans", true).toBool());
 }

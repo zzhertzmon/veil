@@ -156,6 +156,7 @@ public:
     isminetype HaveStealthAddress(const CStealthAddress &sxAddr) const;
     bool GetStealthAddressScanKey(CStealthAddress &sxAddr) const;
     bool GetStealthAddressSpendKey(CStealthAddress &sxAddr, CKey &key) const;
+    bool GetAddressMeta(const CStealthAddress& address, CKeyID& idAccount, std::string& strPath) const;
 
     bool ImportStealthAddress(const CStealthAddress &sxAddr, const CKey &skSpend);
 
@@ -233,6 +234,8 @@ public:
     int PickHidingOutputs(std::vector<std::vector<int64_t> > &vMI, size_t nSecretColumn, size_t nRingSize, std::set<int64_t> &setHave,
         std::string &sError);
 
+
+    bool IsMyAnonInput(const CTxIn& txin);
     int AddAnonInputs_Inner(CWalletTx &wtx, CTransactionRecord &rtx, std::vector<CTempRecipient> &vecSend,
         bool sign, size_t nRingSize, size_t nInputsPerSig, CAmount &nFeeRet, const CCoinControl *coinControl,
         std::string &sError, bool fZerocoinInputs, CAmount nInputValue);
@@ -252,6 +255,8 @@ public:
     bool SetMasterKey(const CExtKey& keyMasterIn);
     bool LoadAccountCounters();
     bool LoadKeys();
+    CKeyID GetSeedHash() const;
+    int GetStealthAccountCount() const;
 
     bool HaveKeyID(const CKeyID& id);
     bool NewKeyFromAccount(const CKeyID &idAccount, CKey& key);
@@ -269,10 +274,13 @@ public:
      */
     int LoadStealthAddresses();
     bool AddStealthDestination(const CKeyID& idStealthAddress, const CKeyID& idStealthDestination);
+    bool AddStealthDestinationMeta(const CKeyID& idStealth, const CKeyID& idStealthDestination, std::vector<uint8_t> &vchEphemPK);
     bool AddKeyToParent(const CKey& keySharedSecret);
+    bool CalculateStealthDestinationKey(const CKeyID& idStealthSpend, const CKeyID& idStealthDestination, const CKey& sShared, CKey& keyDestination) const;
     bool RecordOwnedStealthDestination(const CKey& sShared, const CKeyID& idStealth, const CKeyID& destStealth);
     bool GetStealthLinked(const CKeyID &stealthDest, CStealthAddress &sx) const;
     bool GetStealthAddress(const CKeyID& idStealth, CStealthAddress& stealthAddress);
+    bool HaveStealthDestination(const CKeyID& destStealth) { return mapStealthDestinations.count(destStealth) > 0; }
     bool ProcessLockedStealthOutputs();
     bool ProcessLockedBlindedOutputs();
     bool ProcessStealthOutput(const CTxDestination &address,
@@ -284,10 +292,12 @@ public:
     bool ScanForOwnedOutputs(const CTransaction &tx, size_t &nCT, size_t &nRingCT, mapValue_t &mapNarr);
     bool AddToWalletIfInvolvingMe(const CTransactionRef& ptx, const CBlockIndex* pIndex, int posInBlock, bool fUpdate);
     void MarkOutputSpent(const COutPoint& outpoint, bool isSpent);
+    void RescanWallet();
 
     int InsertTempTxn(const uint256 &txid, const CTransactionRecord *rtx) const;
 
     bool GetCTBlindsFromOutput(const CTxOutCT *pout, uint256& blind) const;
+    bool GetCTBlinds(CScript scriptPubKey, std::vector<uint8_t>& vData, secp256k1_pedersen_commitment* commitment, std::vector<uint8_t>& vRangeproof, uint256 &blind, int64_t& nValue) const;
     bool OwnBlindOut(AnonWalletDB *pwdb, const uint256 &txhash, const CTxOutCT *pout, COutputRecord &rout, CStoredTransaction &stx, bool &fUpdated);
     int OwnAnonOut(AnonWalletDB *pwdb, const uint256 &txhash, const CTxOutRingCT *pout, COutputRecord &rout, CStoredTransaction &stx, bool &fUpdated);
 

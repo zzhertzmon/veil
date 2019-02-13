@@ -104,6 +104,58 @@ static UniValue getnewaddress(const JSONRPCRequest &request)
     return stealthAddress.ToString(fBech32);
 }
 
+static UniValue restoreaddresses(const JSONRPCRequest &request)
+{
+    std::shared_ptr<CWallet> const wallet = GetWalletForJSONRPCRequest(request);
+    if (!EnsureWalletIsAvailable(wallet.get(), request.fHelp))
+        return NullUniValue;
+
+    if (request.fHelp || request.params.size() != 1)
+        throw std::runtime_error(
+                "restoreaddresses (generate_count)\n"
+                "Regenerates deterministic stealth addresses to give wallet knowledge that they are owned"
+                + HelpRequiringPassphrase(wallet.get()) +
+                "\nArguments:\n"
+                "1. generate_count       (int, required) Amount of addresses to add to the wallet internally. WARNING: Generate as few as needed. High address counts will slow down sync times.\n"
+                "\nResult:\n"
+                "\"address\"              (string) The new stealth address\n"
+                "\nExamples:\n"
+                + HelpExampleCli("restoreaddresses", "10")
+                + HelpExampleRpc("restoreaddresses", "10"));
+
+    EnsureWalletIsUnlocked(wallet.get());
+    auto pAnonWallet = wallet->GetAnonWallet();
+
+    unsigned int n = request.params[0].get_int();
+
+    for (unsigned int i = 0; i < n; i++) {
+        CStealthAddress stealthAddress;
+        if (!pAnonWallet->NewStealthKey(stealthAddress, 0, nullptr))
+            throw JSONRPCError(RPC_WALLET_ERROR, _("NewStealthKeyFromAccount failed."));
+    }
+    return NullUniValue;
+}
+
+static UniValue rescanringctwallet(const JSONRPCRequest &request)
+{
+    std::shared_ptr<CWallet> const wallet = GetWalletForJSONRPCRequest(request);
+    if (!EnsureWalletIsAvailable(wallet.get(), request.fHelp))
+        return NullUniValue;
+
+    if (request.fHelp || !request.params.empty())
+        throw std::runtime_error(
+                "rescanringctwallet\n"
+                "Rescans all transactions in the ringct wallet (CT and RingCT transactions)"
+                + HelpRequiringPassphrase(wallet.get()));
+
+    EnsureWalletIsUnlocked(wallet.get());
+    auto pAnonWallet = wallet->GetAnonWallet();
+    LOCK2(cs_main, wallet->cs_wallet);
+
+    pAnonWallet->RescanWallet();
+    return NullUniValue;
+}
+
 static void push(UniValue & entry, std::string key, UniValue const & value)
 {
     if (entry[key].getType() == 0) {
@@ -1497,7 +1549,7 @@ static UniValue fundrawtransactionfrom(const JSONRPCRequest& request)
     }
 
     for (const CTxIn& txin : tx.vin) {
-        coinControl.Select(txin.prevout);
+        coinControl.Select(txin.prevout, 0); //todo select amount
     }
 
     CTransactionRef tx_new;
@@ -1832,11 +1884,14 @@ static const CRPCCommand commands[] =
         { //  category              name                                actor (function)                argNames
                 //  --------------------- ------------------------            -----------------------         ----------
                 { "wallet",             "getnewaddress",             &getnewaddress,          {"label","num_prefix_bits","prefix_num","bech32","makeV2"} },
+                { "wallet",             "restoreaddresses",          &restoreaddresses,          {"generate_count"} },
+                { "wallet",             "rescanringctwallet",          &rescanringctwallet,          {} },
 
                 { "wallet",             "sendbasecointostealth", &sendbasecointostealth,               {"address","amount","comment","comment_to","subtractfeefromamount","narration"} },
 
                 { "wallet",             "sendstealthtobasecoin", &sendstealthtobasecoin,               {"address","amount","comment","comment_to","subtractfeefromamount","narration"} },
                 { "wallet",             "sendstealthtostealth", &sendstealthtostealth,              {"address","amount","comment","comment_to","subtractfeefromamount","narration"} },
+                { "wallet",             "sendstealthtoringct", &sendstealthtoringct,              {"address","amount","comment","comment_to","subtractfeefromamount","narration"} },
 
                 { "wallet",             "sendringcttobasecoin", &sendringcttobasecoin,                {"address","amount","comment","comment_to","subtractfeefromamount","narration","ringsize","inputs_per_sig"} },
                 { "wallet",             "sendringcttostealth", &sendringcttostealth,               {"address","amount","comment","comment_to","subtractfeefromamount","narration","ringsize","inputs_per_sig"} },
